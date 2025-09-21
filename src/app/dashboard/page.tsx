@@ -93,163 +93,172 @@ export default function Dashboard() {
     paymentMethods: { method: string; percentage: number; amount: string }[];
   }>({ hourlyData: [], paymentMethods: [] });
   useEffect(() => {
-    if (typeof window !== "undefined" && localStorage.getItem("token")) {
-      setUserName(localStorage.getItem("name") || "");
-      setToken(localStorage.getItem("token"));
-    } else {
-      router.push("/login");
+    if (typeof window !== "undefined") {
+      const storedToken = localStorage.getItem("token");
+      const storedName = localStorage.getItem("name");
+
+      console.log("Checking localStorage - token:", storedToken ? "exists" : "missing");
+      console.log("Checking localStorage - name:", storedName);
+
+      if (storedToken) {
+        setUserName(storedName || "");
+        setToken(storedToken);
+        console.log("Token found, setting state");
+      } else {
+        console.log("No token found, redirecting to login");
+        router.push("/login");
+      }
     }
-  }, []);
+  }, [router]);
   useEffect(() => {
     // Fetch Paytm profile
     const fetchProfile = async () => {
-      if (!token) return;
+      if (!token) {
+        console.log("No token available for profile fetch");
+        return;
+      }
+
+      console.log("Fetching Paytm profile with token:", token);
       try {
         const res = await fetch("/api/paytm/profile", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ token }),
         });
+
+        console.log("Profile API response status:", res.status);
         const data = await res.json();
+        console.log("Profile API response data:", data);
+
         if (data.status && data.data) {
           setIsPaytmConnected(true);
           setGatewayProfile(data.data);
-          let res2 = await fetch("/api/paytm/qr", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ token }),
-          });
-        
+
+          // Fetch QR code
+          try {
+            const res2 = await fetch("/api/paytm/qr", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ token }),
+            });
+            console.log("QR API response:", await res2.json());
+          } catch (qrErr) {
+            console.log("QR fetch error:", qrErr);
+          }
+        } else {
+          console.log("Profile fetch failed:", data);
+          setIsPaytmConnected(false);
         }
       } catch (err) {
-        console.log(err);
-        
+        console.error("Profile fetch error:", err);
+        setIsPaytmConnected(false);
       }
     };
 
     // Fetch today's stats
     const fetchTodayStats = async () => {
-      if (!token) return;
+      if (!token) {
+        console.log("No token available for stats fetch");
+        return;
+      }
+
+      console.log("Fetching today's stats with token:", token);
       try {
         const res = await fetch("/api/paytm/today", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ token }),
         });
+
+        console.log("Today stats API response status:", res.status);
         const data = await res.json();
-        if (data.status && data.data) {
+        console.log("Today stats API response data:", data);
+
+        if (data.status && data.data && data.data.dayWiseList && data.data.dayWiseList.length > 0) {
           const dayWise = data.data.dayWiseList[0];
-          setTodayStats({
-            totalAmount: `₹${dayWise.totalAmount.value / 100}`,
+
+          const newTodayStats = {
+            totalAmount: `₹${(dayWise.totalAmount.value / 100).toFixed(2)}`,
             transactionCount: dayWise.totalCount,
             successRate: `100%`,
-            avgTransactionValue: `₹${(
-              Number(dayWise.totalAmount.value) /
-              100 /
-              Number(dayWise.totalCount)
-            ).toFixed(2)}`,
+            avgTransactionValue: dayWise.totalCount > 0
+              ? `₹${(Number(dayWise.totalAmount.value) / 100 / Number(dayWise.totalCount)).toFixed(2)}`
+              : "₹0",
             available: Number(data.data.availableBalance / 100),
             failedTransactions: 0,
-          });
+          };
 
-          // hourly data
-          const hourlyData = dayWise.orderList.map((order: ApiOrder) => ({
+          console.log("Setting today stats:", newTodayStats);
+          setTodayStats(newTodayStats);
+
+          // Process hourly data
+          const hourlyData = dayWise.orderList ? dayWise.orderList.map((order: ApiOrder) => ({
             hour: new Date(order.orderCreatedTime).toLocaleTimeString([], {
               hour: "2-digit",
               minute: "2-digit",
             }),
-            amount: Number(order.payMoneyAmount.value),
-          }));
-          setAnalyticsData({ hourlyData, paymentMethods: [] });
-
-          // After setAnalyticsData({ hourlyData, paymentMethods });
+            amount: Number(order.payMoneyAmount.value) / 100,
+          })) : [];
 
           // Prepare paymentMethods summary
-          const methodSummary: Record<
-            string,
-            { amount: number; count: number }
-          > = {};
-          dayWise.orderList.forEach((order: ApiOrder) => {
-            const method = order.additionalInfo.payMethod || "Other";
-            if (!methodSummary[method]) {
-              methodSummary[method] = { amount: 0, count: 0 };
-            }
-            methodSummary[method].amount += Number(order.payMoneyAmount.value);
-            methodSummary[method].count += 1;
-          });
-          const totalAmount = Object.values(methodSummary).reduce(
-            (sum, m) => sum + m.amount,
-            0
-          );
-          const paymentMethods = Object.entries(methodSummary).map(
-            ([method, { amount, count }]) => ({
-              method,
-              percentage: totalAmount
-                ? Math.round((amount / totalAmount) * 100)
-                : 0,
-              amount: `₹${amount}`,
-            })
-          );
+          const methodSummary: Record<string, { amount: number; count: number }> = {};
 
-          // transactions
-          const transactions: Transaction[] = dayWise.orderList.map(
-            (order: ApiOrder) => ({
-              id: order.bizOrderId,
-              customer:
-                order.additionalInfo.customerName ||
-                order.nickName ||
-                "Unknown",
-              amount: `₹${Number(order.payMoneyAmount.value) / 100}`,
-              status:
-                order.orderStatus === "SUCCESS"
-                  ? "completed"
-                  : order.orderStatus === "PENDING"
-                  ? "pending"
-                  : "failed",
-              time: new Date(order.orderCreatedTime).toLocaleTimeString([], {
-                hour: "2-digit",
-                minute: "2-digit",
-              }),
-              method: order.additionalInfo.payMethod || "Other",
-              orderId:
-                order.additionalInfo.comment || order.merchantTransId || "",
-            })
-          );
+          if (dayWise.orderList) {
+            dayWise.orderList.forEach((order: ApiOrder) => {
+              const method = order.additionalInfo?.payMethod || "Other";
+              if (!methodSummary[method]) {
+                methodSummary[method] = { amount: 0, count: 0 };
+              }
+              methodSummary[method].amount += Number(order.payMoneyAmount.value) / 100;
+              methodSummary[method].count += 1;
+            });
+          }
+
+          const totalAmount = Object.values(methodSummary).reduce((sum, m) => sum + m.amount, 0);
+          const paymentMethods = Object.entries(methodSummary).map(([method, { amount, count }]) => ({
+            method,
+            percentage: totalAmount ? Math.round((amount / totalAmount) * 100) : 0,
+            amount: `₹${amount.toFixed(2)}`,
+          }));
+
+          // Process transactions
+          const transactions: Transaction[] = dayWise.orderList ? dayWise.orderList.map((order: ApiOrder) => ({
+            id: order.bizOrderId,
+            customer: order.additionalInfo?.customerName || order.nickName || "Unknown",
+            amount: `₹${(Number(order.payMoneyAmount.value) / 100).toFixed(2)}`,
+            status: order.orderStatus === "SUCCESS" ? "completed"
+              : order.orderStatus === "PENDING" ? "pending"
+                : "failed",
+            time: new Date(order.orderCreatedTime).toLocaleTimeString([], {
+              hour: "2-digit",
+              minute: "2-digit",
+            }),
+            method: order.additionalInfo?.payMethod || "Other",
+            orderId: order.additionalInfo?.comment || order.merchantTransId || "",
+          })) : [];
+
+          console.log("Setting transactions:", transactions);
           setRecentTransactions(transactions);
 
-          setAnalyticsData({
-            hourlyData,
-            paymentMethods,
-          });
-
-          // After setAnalyticsData({ hourlyData, paymentMethods });
-          const peakData = analyticsData.hourlyData.length
-            ? analyticsData.hourlyData.reduce(
-                (max, curr) => (curr.amount > max.amount ? curr : max),
-                analyticsData.hourlyData[0]
-              )
-            : { hour: "--", amount: 0 };
-
-          const avgHour = analyticsData.hourlyData.length
-            ? (
-                analyticsData.hourlyData.reduce(
-                  (sum, curr) => sum + curr.amount,
-                  0
-                ) / analyticsData.hourlyData.length
-              ).toFixed(2)
-            : "0";
-
-          const growth = "N/A"; // You can calculate this if you have yesterday's data
+          console.log("Setting analytics data:", { hourlyData, paymentMethods });
+          setAnalyticsData({ hourlyData, paymentMethods });
+        } else {
+          console.log("No valid data in today stats response:", data);
         }
       } catch (err) {
-        // Optionally handle error
-        console.log(err);
+        console.error("Today stats fetch error:", err);
       }
     };
 
-    fetchProfile();
-    fetchTodayStats();
-  }, [token]);
+    // Only fetch data if token is available
+    if (token) {
+      console.log("Token available, fetching data...");
+      fetchProfile();
+      fetchTodayStats();
+    } else {
+      console.log("No token available, skipping API calls");
+    }
+  }, [token]); // Add token as dependency
 
   // Enhanced mock data
   const currentPlan = {
@@ -329,163 +338,163 @@ export default function Dashboard() {
   return (
     <div className="min-h-screen bg-gray-50">
       {/* Enhanced Header */}
-    <header className="bg-white shadow-sm border-b relative">
-      {/* Mobile menu toggle (CSS-only via peer) */}
-      <input id="mobile-menu" type="checkbox" className="peer hidden" />
+      <header className="bg-white shadow-sm border-b relative">
+        {/* Mobile menu toggle (CSS-only via peer) */}
+        <input id="mobile-menu" type="checkbox" className="peer hidden" />
 
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-        <div className="flex justify-between items-center h-16">
-        <div className="flex items-center space-x-8">
-          <Link href="/" className="flex items-center space-x-2">
-            <div className="w-8 h-8 bg-gradient-to-r from-purple-600 to-pink-600 rounded-lg flex items-center justify-center">
-            <CreditCard className="w-5 h-5 text-white" />
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+          <div className="flex justify-between items-center h-16">
+            <div className="flex items-center space-x-8">
+              <Link href="/" className="flex items-center space-x-2">
+                <div className="w-8 h-8 bg-gradient-to-r from-purple-600 to-pink-600 rounded-lg flex items-center justify-center">
+                  <CreditCard className="w-5 h-5 text-white" />
+                </div>
+                <span className="text-xl font-bold text-gray-900">
+                  UPI Gateway
+                </span>
+              </Link>
+
+              {/* Navigation Links (desktop) */}
+              <nav className="hidden md:flex items-center space-x-6">
+                <Link href="/dashboard" className="text-purple-600 font-medium">
+                  Dashboard
+                </Link>
+                <Link
+                  href="/profile"
+                  className="text-gray-600 hover:text-purple-600 transition-colors"
+                >
+                  Profile
+                </Link>
+                <Link
+                  href="/docs"
+                  className="text-gray-600 hover:text-purple-600 transition-colors"
+                >
+                  API Docs
+                </Link>
+              </nav>
+
+              <div className="items-center space-x-2 md:flex hidden">
+                <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
+                <span className="text-sm text-gray-600">Live</span>
+              </div>
             </div>
-            <span className="text-xl font-bold text-gray-900">
-            UPI Gateway
-            </span>
-          </Link>
 
-          {/* Navigation Links (desktop) */}
-          <nav className="hidden md:flex items-center space-x-6">
-            <Link href="/dashboard" className="text-purple-600 font-medium">
-            Dashboard
+            <div className="flex items-center space-x-4">
+              <button
+                onClick={handleRefresh}
+                className={`p-2 text-gray-400 hover:text-gray-500 transition-colors ${isRefreshing ? "animate-spin" : ""} hidden sm:inline-flex`}
+              >
+                <RefreshCw className="w-5 h-5" />
+              </button>
+
+              <button className="relative p-2 text-gray-400 hover:text-gray-500">
+                <Bell className="w-5 h-5" />
+                <span className="absolute -top-1 -right-1 w-3 h-3 bg-red-500 rounded-full"></span>
+              </button>
+
+              <Link
+                href="/profile"
+                className="hidden md:flex items-center space-x-2 hover:bg-gray-50 rounded-lg px-2 py-1 transition-colors"
+              >
+                <div className="w-8 h-8 bg-purple-100 rounded-full flex items-center justify-center">
+                  <User className="w-5 h-5 text-purple-600" />
+                </div>
+                <span className="text-sm font-medium text-gray-700">
+                  {userName}
+                </span>
+              </Link>
+
+              {/* Logout (desktop) */}
+              <button
+                onClick={handleLogout}
+                className="p-2 text-red-500 hover:text-red-700 transition hidden md:block"
+                title="Logout"
+              >
+                <Power className="w-5 h-5" />
+              </button>
+
+              {/* Hamburger (mobile) */}
+              <label
+                htmlFor="mobile-menu"
+                className="md:hidden p-2 rounded-lg hover:bg-gray-50 cursor-pointer"
+                aria-label="Toggle navigation"
+              >
+                <span className="block w-5 h-0.5 bg-gray-700 mb-1"></span>
+                <span className="block w-5 h-0.5 bg-gray-700 mb-1"></span>
+                <span className="block w-5 h-0.5 bg-gray-700"></span>
+              </label>
+            </div>
+          </div>
+        </div>
+
+        {/* Mobile dropdown panel */}
+        <div
+          id="mobile-menu-panel"
+          className="md:hidden peer-checked:block hidden border-t bg-white"
+        >
+          <div className="px-4 py-3 space-y-3">
+            <Link
+              href="/dashboard"
+              className="block text-gray-700 hover:text-purple-600"
+              onClick={() => {
+                const el = document.getElementById("mobile-menu") as HTMLInputElement | null;
+                if (el) el.checked = false;
+              }}
+            >
+              Dashboard
             </Link>
             <Link
-            href="/profile"
-            className="text-gray-600 hover:text-purple-600 transition-colors"
+              href="/profile"
+              className="block text-gray-700 hover:text-purple-600"
+              onClick={() => {
+                const el = document.getElementById("mobile-menu") as HTMLInputElement | null;
+                if (el) el.checked = false;
+              }}
             >
-            Profile
+              Profile
             </Link>
             <Link
-            href="/docs"
-            className="text-gray-600 hover:text-purple-600 transition-colors"
+              href="/docs"
+              className="block text-gray-700 hover:text-purple-600"
+              onClick={() => {
+                const el = document.getElementById("mobile-menu") as HTMLInputElement | null;
+                if (el) el.checked = false;
+              }}
             >
-            API Docs
+              API Docs
             </Link>
-          </nav>
 
-          <div className="items-center space-x-2 md:flex hidden">
-            <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
-            <span className="text-sm text-gray-600">Live</span>
-          </div>
-        </div>
-
-        <div className="flex items-center space-x-4">
-          <button
-            onClick={handleRefresh}
-            className={`p-2 text-gray-400 hover:text-gray-500 transition-colors ${isRefreshing ? "animate-spin" : ""} hidden sm:inline-flex`}
-          >
-            <RefreshCw className="w-5 h-5" />
-          </button>
-
-          <button className="relative p-2 text-gray-400 hover:text-gray-500">
-            <Bell className="w-5 h-5" />
-            <span className="absolute -top-1 -right-1 w-3 h-3 bg-red-500 rounded-full"></span>
-          </button>
-
-          <Link
-            href="/profile"
-            className="hidden md:flex items-center space-x-2 hover:bg-gray-50 rounded-lg px-2 py-1 transition-colors"
-          >
-            <div className="w-8 h-8 bg-purple-100 rounded-full flex items-center justify-center">
-            <User className="w-5 h-5 text-purple-600" />
+            <div className="pt-2 border-t flex items-center justify-between">
+              <div className="flex items-center space-x-2">
+                <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
+                <span className="text-sm text-gray-600">Live</span>
+              </div>
+              <div className="flex items-center space-x-2">
+                <button
+                  onClick={() => {
+                    handleRefresh();
+                    const el = document.getElementById("mobile-menu") as HTMLInputElement | null;
+                    if (el) el.checked = false;
+                  }}
+                  className="px-3 py-1.5 text-sm text-gray-600 border rounded-lg hover:bg-gray-50"
+                >
+                  Refresh
+                </button>
+                <button
+                  onClick={() => {
+                    handleLogout();
+                    const el = document.getElementById("mobile-menu") as HTMLInputElement | null;
+                    if (el) el.checked = false;
+                  }}
+                  className="px-3 py-1.5 text-sm text-red-600 border border-red-200 rounded-lg hover:bg-red-50"
+                >
+                  Logout
+                </button>
+              </div>
             </div>
-            <span className="text-sm font-medium text-gray-700">
-            {userName}
-            </span>
-          </Link>
-
-          {/* Logout (desktop) */}
-          <button
-            onClick={handleLogout}
-            className="p-2 text-red-500 hover:text-red-700 transition hidden md:block"
-            title="Logout"
-          >
-            <Power className="w-5 h-5" />
-          </button>
-
-          {/* Hamburger (mobile) */}
-          <label
-            htmlFor="mobile-menu"
-            className="md:hidden p-2 rounded-lg hover:bg-gray-50 cursor-pointer"
-            aria-label="Toggle navigation"
-          >
-            <span className="block w-5 h-0.5 bg-gray-700 mb-1"></span>
-            <span className="block w-5 h-0.5 bg-gray-700 mb-1"></span>
-            <span className="block w-5 h-0.5 bg-gray-700"></span>
-          </label>
-        </div>
-        </div>
-      </div>
-
-      {/* Mobile dropdown panel */}
-      <div
-        id="mobile-menu-panel"
-        className="md:hidden peer-checked:block hidden border-t bg-white"
-      >
-        <div className="px-4 py-3 space-y-3">
-        <Link
-          href="/dashboard"
-          className="block text-gray-700 hover:text-purple-600"
-          onClick={() => {
-            const el = document.getElementById("mobile-menu") as HTMLInputElement | null;
-            if (el) el.checked = false;
-          }}
-        >
-          Dashboard
-        </Link>
-        <Link
-          href="/profile"
-          className="block text-gray-700 hover:text-purple-600"
-          onClick={() => {
-            const el = document.getElementById("mobile-menu") as HTMLInputElement | null;
-            if (el) el.checked = false;
-          }}
-        >
-          Profile
-        </Link>
-        <Link
-          href="/docs"
-          className="block text-gray-700 hover:text-purple-600"
-          onClick={() => {
-            const el = document.getElementById("mobile-menu") as HTMLInputElement | null;
-            if (el) el.checked = false;
-          }}
-        >
-          API Docs
-        </Link>
-
-        <div className="pt-2 border-t flex items-center justify-between">
-          <div className="flex items-center space-x-2">
-            <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
-            <span className="text-sm text-gray-600">Live</span>
-          </div>
-          <div className="flex items-center space-x-2">
-            <button
-            onClick={() => {
-              handleRefresh();
-              const el = document.getElementById("mobile-menu") as HTMLInputElement | null;
-              if (el) el.checked = false;
-            }}
-            className="px-3 py-1.5 text-sm text-gray-600 border rounded-lg hover:bg-gray-50"
-            >
-            Refresh
-            </button>
-            <button
-            onClick={() => {
-              handleLogout();
-              const el = document.getElementById("mobile-menu") as HTMLInputElement | null;
-              if (el) el.checked = false;
-            }}
-            className="px-3 py-1.5 text-sm text-red-600 border border-red-200 rounded-lg hover:bg-red-50"
-            >
-            Logout
-            </button>
           </div>
         </div>
-        </div>
-      </div>
-    </header>
+      </header>
 
       <div className="max-w-7xl mx-auto px-2 sm:px-4 lg:px-8 py-4">
         {/* Quick Actions Bar */}
@@ -702,11 +711,10 @@ export default function Dashboard() {
                       {/* Bar */}
                       <div className="relative w-8 bg-gray-100 rounded-t-lg overflow-hidden group-hover:shadow-lg transition-all duration-300">
                         <div
-                          className={`w-full rounded-t-lg transition-all duration-1000 ease-out ${
-                            isHighest
+                          className={`w-full rounded-t-lg transition-all duration-1000 ease-out ${isHighest
                               ? "bg-gradient-to-t from-purple-600 via-purple-500 to-pink-400"
                               : "bg-gradient-to-t from-purple-500 to-purple-400"
-                          } group-hover:from-purple-600 group-hover:to-pink-500`}
+                            } group-hover:from-purple-600 group-hover:to-pink-500`}
                           style={{
                             height: `${height}%`,
                             minHeight: "8px",
@@ -840,11 +848,10 @@ export default function Dashboard() {
 
                   <button
                     onClick={() => router.push("/paytm")}
-                    className={`px-3 py-1 rounded-lg text-sm font-medium transition-colors ${
-                      isPaytmConnected
+                    className={`px-3 py-1 rounded-lg text-sm font-medium transition-colors ${isPaytmConnected
                         ? "bg-red-100 text-red-700 hover:bg-red-200"
                         : "bg-blue-600 text-white hover:bg-blue-700"
-                    }`}
+                      }`}
                   >
                     {isPaytmConnected ? "Disconnect" : "Connect"}
                   </button>
@@ -1072,11 +1079,10 @@ export default function Dashboard() {
             {pricingPlans.map((plan, index) => (
               <div
                 key={index}
-                className={`relative bg-white rounded-xl shadow-sm border p-6 transition-all hover:shadow-lg ${
-                  plan.popular
+                className={`relative bg-white rounded-xl shadow-sm border p-6 transition-all hover:shadow-lg ${plan.popular
                     ? "ring-2 ring-purple-500 border-purple-500 transform scale-105 mx-2"
                     : ""
-                }`}
+                  }`}
               >
                 {plan.popular && (
                   <div className="absolute -top-3 left-1/2 transform -translate-x-1/2">
@@ -1108,11 +1114,10 @@ export default function Dashboard() {
                 </ul>
 
                 <button
-                  className={`w-full py-3 px-4 rounded-lg font-medium transition-all ${
-                    plan.popular
+                  className={`w-full py-3 px-4 rounded-lg font-medium transition-all ${plan.popular
                       ? "bg-purple-600 text-white hover:bg-purple-700 shadow-lg"
                       : "bg-gray-100 text-gray-900 hover:bg-gray-200"
-                  }`}
+                    }`}
                 >
                   {plan.name === currentPlan.name
                     ? "Current Plan"
